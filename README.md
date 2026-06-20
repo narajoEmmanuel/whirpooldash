@@ -23,8 +23,8 @@ Si abres este fork en GitHub, debes asumir que la UI puede arrancar, pero las se
 | Dashboard Performance (KPIs) | Depende de PostgreSQL Azure | Requiere tabla `sellout` y credenciales válidas |
 | Dashboard Performance (gráficos) | Parcial | Algunos gráficos usan datos estáticos en `components/dashboard.py` |
 | Market Performance | Depende de PostgreSQL Azure | Requiere tabla `iqsigma`; sin alternativa local hoy |
-| Prediction (XGBoost) | Depende de Azure Blob Storage | Requiere tres archivos `.pkl`; tokens SAS embebidos expirados o expuestos (HTTP 403) |
-| Price Calculator (FastAPI + LSTM) | Legacy | Backend importable; **no expuesto** en la navegación principal |
+| Prediction (XGBoost) | Depende de Azure Blob Storage | Los tres blobs XGBoost devolvieron **403** en prueba HEAD (SAS por blob expirado). No confirma ausencia del archivo |
+| Price Calculator (FastAPI + LSTM) | Parcial / legacy | `lstm_model.pkl` respondió **200** en prueba HEAD; backend no expuesto en navegación principal |
 | CI/CD | Presente | `.github/workflows/deploy.yml` apunta a infraestructura del autor original |
 
 **Conclusión:** el proyecto **sí es viable como base técnica** para continuar desarrollo, evaluación académica o reconstrucción controlada. **No es plenamente reproducible** con el estado actual del repositorio porque faltan datos históricos, modelos entrenados y secretos externos.
@@ -161,6 +161,41 @@ Opciones para continuar:
 2. **Reconstruir** modelos localmente si tienes datos de entrenamiento.
 3. Implementar un **fallback demo** (reglas simples o modelo entrenado con CSV sintético).
 
+## Recursos externos identificados
+
+Referencias encontradas en código, workflows y documentación del proyecto original. **No incluyen credenciales.**
+
+| Recurso | URL / identificador seguro | Uso en el proyecto | Estado esperado |
+|---------|---------------------------|-------------------|-----------------|
+| Azure Web App pública | `https://streamlit-app-demos-a0a8b9e7c7c5cfcu.canadacentral-01.azurewebsites.net` | Despliegue original de la app Streamlit | Responde si el App Service sigue activo |
+| PostgreSQL Azure | `streamlit-postgres.postgres.database.azure.com` (DB `postgres`, RG `st`, Canada Central, PostgreSQL 15, SKU `Standard_B1ms`, 32 GB) | Fuente de datos `sellout` e `iqsigma` | Requiere credenciales y permisos de firewall |
+| Azure Blob Storage | `modelstoragest.blob.core.windows.net` | Modelos `.pkl` y dataset fuente | Requiere SAS vigente o acceso autorizado |
+| Contenedor `models` | `https://modelstoragest.blob.core.windows.net/models` | Modelos LSTM y XGBoost | No incluir SAS completo en documentación |
+| Contenedor `data` | `https://modelstoragest.blob.core.windows.net/data` | Datos auxiliares XGBoost (`final_xgb_encoded_columns.pkl`, `final_xgb_source_data.pkl`) | Requiere SAS con permiso sobre ese contenedor o blob |
+| Google Colab relacionado | `https://colab.research.google.com/drive/10qiK5uM7dD8yxUwEj2gzDSB24u5v7dcd?usp=sharing` | Notebook relacionado al flujo de modelos o pruebas | Puede requerir permisos de Google para abrir el contenido |
+
+> No se deben publicar tokens SAS, passwords, connection strings completas ni secretos de GitHub. Los enlaces de Azure Blob con `sig=...` funcionan como credenciales temporales y deben mantenerse fuera del repositorio.
+
+**Importante:** que la Web App pública responda **no demuestra** que KPIs, Market Performance ni Prediction funcionen con datos reales. PostgreSQL sigue requiriendo acceso autorizado. Azure Blob requiere SAS vigente o storage propio. Los modelos `.pkl` no deben versionarse en Git. No reutilices recursos del autor original sin autorización; para este fork, la ruta recomendada sigue siendo **modo offline reproducible** o **Azure propio** (ver auditoría técnica).
+
+## Estado de pruebas externas
+
+Pruebas de conectividad ejecutadas el **2026-06-20** con métodos no destructivos (`Invoke-WebRequest`, `HEAD`, `SELECT 1`). Sin descarga de modelos, sin `pickle.load()`, sin dumps de datos.
+
+| Prueba | Resultado | Interpretación |
+|--------|-----------|----------------|
+| Azure Web App | **200** — HTML `text/html`, indicios de Streamlit (~1.5 KB) | El despliegue público existe y el frontend responde; **no confirma** funcionalidad completa de pestañas ni datos |
+| PostgreSQL Azure | **Falló** — autenticación rechazada con credenciales placeholder del código | El host es alcanzable; se requiere connection string válida en `POSTGRES_CONNECTION_STRING`. No se listaron tablas |
+| Blob contenedor `models` (HEAD raíz) | **403** | HEAD sobre la raíz del contenedor puede fallar sin permiso de listado; no implica por sí solo que el storage esté caído |
+| Blob `models/lstm_model.pkl` | **200** — ~151 KB, `application/octet-stream` | El modelo LSTM legacy parece disponible con token SAS de contenedor (privado; no documentar URL completa) |
+| Blob `final_xgb_model.pkl` | **403** | SAS por blob en `run_model.py` expirado o sin permiso; Prediction XGBoost no operativa con credenciales embebidas |
+| Blob `final_xgb_encoded_columns.pkl` | **403** | Necesario para Prediction; no accesible con SAS actual del código |
+| Blob `final_xgb_source_data.pkl` | **403** | Necesario para Prediction; no accesible con SAS actual del código |
+| Blob contenedor `data` (HEAD raíz) | **403** | El SAS de contenedor en `config.py` apunta a `models`; el contenedor `data` requiere su propio SAS o blob SAS |
+| Google Colab | **200** — HTML | La URL responde; el notebook puede requerir inicio de sesión Google para ver o ejecutar contenido |
+
+Para repetir pruebas de PostgreSQL o blobs con credenciales propias, usa variables de entorno locales o `.env` (no commitear). Consulta `docs/auditoria-tecnica-whirpooldash.md` para el detalle de integraciones y riesgos.
+
 ## Variables de entorno
 
 Crea un archivo `.env` en la raíz del proyecto. **No lo commitees.**
@@ -226,7 +261,8 @@ Comportamiento esperado **sin credenciales Azure/PostgreSQL válidas**:
 - La UI abre y la navegación funciona.
 - KPIs pueden mostrarse en cero o con warnings de base de datos.
 - Market Performance queda vacío o con error.
-- Prediction falla con HTTP 403 al descargar blobs remotos.
+- Prediction falla con HTTP **403** al descargar los tres blobs XGBoost (SAS por blob expirado en `run_model.py`).
+- El blob `lstm_model.pkl` puede responder **200** con SAS de contenedor, pero eso no activa Prediction XGBoost ni garantiza el flujo FastAPI completo.
 - Algunos gráficos estáticos del dashboard sí se renderizan.
 
 ## Docker
